@@ -131,8 +131,7 @@ class ProbeManager:
         domain = extract_domain(probe.url)
         rule_template = {
             "type": "field",
-            "domain": [f"domain:{domain}"],
-            "inboundTag": ["socks-probe"]
+            "domain": [f"domain:{domain}"]
         }
         
         # 如果 probe 配置了自定义 rules，合并到模板中
