@@ -27,6 +27,7 @@ def should_send_alert(current_quality: str, alert_level: str) -> bool:
     Returns:
         True 如果应该发送告警，False 否则
     """
+    import logging
     current_level = QUALITY_LEVELS.get(current_quality, 0)
     threshold_level = QUALITY_LEVELS.get(alert_level, 1)
     return current_level >= threshold_level
@@ -107,7 +108,8 @@ class AppConfig:
     probes: List[Probe]
     default_outbounds: List[str]
     default_exclude_outbounds: List[str]
-    xray: XraySettings
+    xray_test: XraySettings  # 测试环境 xray 配置
+    xray_prod: XraySettings  # 生产环境 xray 配置
     user_agent: Optional[str] = None
     telegram: Optional[TelegramSettings] = None
     state_file: str = "state.json"
@@ -174,8 +176,33 @@ class ConfigLoader:
                 )
                 probes.append(probe)
 
-            xray_raw = raw.get("xray", {})
-            xray = XraySettings(api=xray_raw.get("api", "127.0.0.1:8000"), exe=xray_raw.get("exe", "xray"))
+            # 支持两种配置方式：
+            # 1. 旧版本：单个 xray 配置（向后兼容）
+            # 2. 新版本：xray_test 和 xray_prod 分别配置
+            xray_raw = raw.get("xray")
+            xray_test_raw = raw.get("xray_test")
+            xray_prod_raw = raw.get("xray_prod")
+            
+            # 如果提供了新版本配置，使用新版本
+            if xray_test_raw and xray_prod_raw:
+                xray_test = XraySettings(
+                    api=xray_test_raw.get("api", "127.0.0.1:8000"),
+                    exe=xray_test_raw.get("exe", "xray")
+                )
+                xray_prod = XraySettings(
+                    api=xray_prod_raw.get("api", "127.0.0.1:8000"),
+                    exe=xray_prod_raw.get("exe", "xray")
+                )
+            # 否则使用旧版本配置（向后兼容）
+            elif xray_raw:
+                xray = XraySettings(
+                    api=xray_raw.get("api", "127.0.0.1:8000"),
+                    exe=xray_raw.get("exe", "xray")
+                )
+                xray_test = xray
+                xray_prod = xray
+            else:
+                raise ConfigError("必须配置 xray_test 和 xray_prod，或配置 xray（向后兼容）")
 
             telegram = None
             telegram_raw = raw.get("telegram")
@@ -192,7 +219,8 @@ class ConfigLoader:
                 default_outbounds=raw.get("default_outbounds", []),
                 default_exclude_outbounds=raw.get("default_exclude_outbounds", []),
                 alert_level=global_alert_level,
-                xray=xray,
+                xray_test=xray_test,
+                xray_prod=xray_prod,
                 user_agent=raw.get("user_agent"),
                 telegram=telegram,
                 state_file=raw.get("state_file", "state.json"),

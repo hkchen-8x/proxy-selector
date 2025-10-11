@@ -28,9 +28,10 @@ from modules import (
 
 
 class ProbeManager:
-    def __init__(self, config: AppConfig, xray_client: XrayAPIClient, timeout_ms: int) -> None:
+    def __init__(self, config: AppConfig, xray_test_client: XrayAPIClient, xray_prod_client: XrayAPIClient, timeout_ms: int) -> None:
         self._config = config
-        self._xray = xray_client
+        self._xray_test = xray_test_client  # 用于测试候选出站
+        self._xray_prod = xray_prod_client  # 用于生产环境规则
         self._playwright = PlaywrightProbe(timeout_ms=timeout_ms, user_agent=config.user_agent)
         self._telegram = TelegramNotifier(config.telegram)
         self._state = StateManager(Path(config.state_file).expanduser().resolve())
@@ -71,9 +72,7 @@ class ProbeManager:
         if candidate:
             logging.info("%s 找到最优解出站 %s，切换上线", probe.name, candidate)
             self._state.update(probe.name, "optimal", outbound=candidate, reason=f"从次优解切换到最优解 {candidate}")
-            # 检查是否需要发送告警
-            if self._should_alert(probe, "optimal"):
-                await self._send_outbound_change_alert(probe, candidate, success=True, from_suboptimal=True)
+            await self._send_outbound_change_alert(probe, candidate, success=True, from_suboptimal=True)
         else:
             logging.warning("%s 未找到最优解，保持当前次优解", probe.name)
             self._state.update(probe.name, "suboptimal", reason=outcome.reason)
@@ -89,9 +88,7 @@ class ProbeManager:
         if candidate:
             logging.info("%s 使用新出站 %s 已切换上线", probe.name, candidate)
             self._state.update(probe.name, "optimal", outbound=candidate, reason=f"已切换到 {candidate}")
-            # 检查是否需要发送告警
-            if self._should_alert(probe, "optimal"):
-                await self._send_outbound_change_alert(probe, candidate, success=True)
+            await self._send_outbound_change_alert(probe, candidate, success=True)
         else:
             logging.error("%s 未找到可用出站, 请人工介入", probe.name)
             self._state.update(probe.name, "blocked", reason="所有候选出站均不可用")
@@ -150,14 +147,14 @@ class ProbeManager:
         for outbound in candidates:
             logging.info("尝试候选出站 %s", outbound)
             try:
-                self._xray.remove_routing_rule(test_tag)
+                self._xray_test.remove_routing_rule(test_tag)
             except XrayAPIError:
                 logging.debug("测试规则 %s 不存在, 忽略", test_tag)
 
             test_rule = dict(rule_template)
             test_rule.update({"ruleTag": test_tag, "outboundTag": outbound})
             try:
-                self._xray.add_routing_rule(test_rule)
+                self._xray_test.add_routing_rule(test_rule)
             except XrayAPIError as exc:
                 logging.error("添加测试规则失败 (%s): %s", outbound, exc)
                 continue
@@ -178,7 +175,7 @@ class ProbeManager:
 
         # 清理测试规则
         try:
-            self._xray.remove_routing_rule(test_tag)
+            self._xray_test.remove_routing_rule(test_tag)
         except XrayAPIError:
             logging.debug("测试规则清理失败, 可能不存在")
         
@@ -197,14 +194,14 @@ class ProbeManager:
 
     def _promote_outbound(self, prod_tag: str, rule_template: Dict[str, Any], outbound: str) -> None:
         try:
-            self._xray.remove_routing_rule(prod_tag)
+            self._xray_prod.remove_routing_rule(prod_tag)
             logging.info("已删除旧生产规则: %s", prod_tag)
         except XrayAPIError:
             logging.info("生产规则 %s 不存在, 直接添加", prod_tag)  
 
         new_rule = dict(rule_template)
         new_rule.update({"tag": prod_tag, "outboundTag": outbound})
-        self._xray.add_routing_rule(new_rule)
+        self._xray_prod.add_routing_rule(new_rule)
         logging.info("已添加生产规则 %s -> %s", prod_tag, outbound)
 
     async def _send_quality_alert(self, probe: Probe, outcome: ProbeOutcome) -> None:
@@ -293,8 +290,12 @@ async def async_main(args: argparse.Namespace) -> None:
     config_path = Path(args.config).expanduser().resolve()
     config = ConfigLoader.load(config_path)
  
-    xray_client = XrayAPIClient(config.xray, dry_run=args.dry_run)
-    manager = ProbeManager(config, xray_client, timeout_ms=args.timeout)
+    xray_test_client = XrayAPIClient(config.xray_test, dry_run=args.dry_run)
+    xray_prod_client = XrayAPIClient(config.xray_prod, dry_run=args.dry_run)
+    logging.info("测试 Xray API: %s", config.xray_test.api)
+    logging.info("生产 Xray API: %s", config.xray_prod.api)
+    
+    manager = ProbeManager(config, xray_test_client, xray_prod_client, timeout_ms=args.timeout)
     await manager.run()
 
 

@@ -25,6 +25,7 @@ class ProbeOutcome:
     reason: Optional[str] = None
     status: Optional[int] = None
     quality: str = "optimal"  # optimal(最优), suboptimal(次优-有验证码), blocked(最差-被禁止)
+    request_latency_ms: int = 0  # 首次请求响应耗时
 
 
 class PlaywrightProbe:
@@ -33,6 +34,8 @@ class PlaywrightProbe:
         self._user_agent = user_agent
 
     async def check(self, probe: Probe, proxy_url: str) -> ProbeOutcome:
+        import time
+        
         try:
             async with async_playwright() as p:
                 browser = await self._launch_browser(p, proxy_url)
@@ -43,13 +46,24 @@ class PlaywrightProbe:
                     
                     context = await browser.new_context(**context_options)
                     page = await context.new_page()
-                    response = await page.goto(probe.url, wait_until="domcontentloaded", timeout=self._timeout_ms)
+                    
+                    # 测量纯网络请求延迟（到服务器响应返回）
+                    start_time = time.time()
+                    response = await page.goto(probe.url, wait_until="commit", timeout=self._timeout_ms)
+                    request_latency = int((time.time() - start_time) * 1000)
+                    
                     status = response.status if response else None
             
                     if status is None:
                         logging.error("状态码为空: %s", probe.url)
-                        return ProbeOutcome(ok=False, reason="状态码为空", status=status, quality="blocked")
+                        return ProbeOutcome(ok=False, reason="状态码为空", status=status, quality="blocked", request_latency_ms=request_latency)
 
+                    # 等待 DOM 加载完成以便后续内容检查
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=self._timeout_ms)
+                    except PlaywrightTimeoutError:
+                        logging.warning("%s DOM 加载超时，继续检查", probe.name)
+                    
                     # 如果配置了等待时间，等待指定秒数（用于等待 JavaScript 动态内容）
                     if probe.wait_seconds is not None and probe.wait_seconds > 0:
                         logging.debug("%s 等待 %d 秒以加载动态内容", probe.name, probe.wait_seconds)
@@ -57,6 +71,7 @@ class PlaywrightProbe:
                     
                     # 检查质量等级
                     quality_result = await self._check_quality(probe, page, status)
+                    quality_result.request_latency_ms = request_latency
                     
                     await browser.close()
                     return quality_result
