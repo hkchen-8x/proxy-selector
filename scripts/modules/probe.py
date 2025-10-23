@@ -35,7 +35,9 @@ class PlaywrightProbe:
 
     async def check(self, probe: Probe, proxy_url: str) -> ProbeOutcome:
         import time
+        import asyncio
         
+        browser = None
         try:
             async with async_playwright() as p:
                 browser = await self._launch_browser(p, proxy_url)
@@ -72,8 +74,6 @@ class PlaywrightProbe:
                     # 检查质量等级
                     quality_result = await self._check_quality(probe, page, status)
                     quality_result.request_latency_ms = request_latency
-                    
-                    await browser.close()
                     return quality_result
                     
                 except PlaywrightTimeoutError:
@@ -83,14 +83,35 @@ class PlaywrightProbe:
                         pass
                     return ProbeOutcome(ok=False, reason="页面加载超时", quality="blocked")
                 finally:
-                    if browser.is_connected():
-                        await browser.close()
+                    # 为 browser.close() 添加超时保护，避免永久阻塞
+                    if browser and browser.is_connected():
+                        try:
+                            await asyncio.wait_for(browser.close(), timeout=5.0)
+                        except asyncio.TimeoutError:
+                            logging.warning("%s 浏览器关闭超时(5秒)，已跳过", probe.name)
+                        except Exception as e:
+                            logging.debug("%s 浏览器关闭异常: %s", probe.name, e)
 
         except PlaywrightError as exc:
             return ProbeOutcome(ok=False, reason=f"Playwright错误: {exc}", quality="blocked")
 
     async def _launch_browser(self, playwright: Playwright, proxy_url: str) -> Browser:
-        return await playwright.chromium.launch(headless=True, proxy={"server": proxy_url})
+        return await playwright.chromium.launch(
+            headless=True,
+            proxy={"server": proxy_url},
+            args=[
+                '--disable-gpu',  # 禁用GPU，避免GPU进程卡住
+                '--disable-dev-shm-usage',  # 避免共享内存问题
+                '--disable-hang-monitor',  # 禁用挂起监视器
+                '--disable-background-networking',  # 禁用后台网络请求
+                '--disable-background-timer-throttling',
+                '--disable-renderer-backgrounding',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-ipc-flooding-protection',
+                '--no-first-run',
+                '--no-default-browser-check',
+            ],
+        )
 
     async def _check_quality(self, probe: Probe, page, status: Optional[int]) -> ProbeOutcome:
         """检查页面质量等级: optimal/suboptimal/blocked"""
